@@ -13,6 +13,7 @@
 
 interface Env {
 	GITHUB_TOKEN: string;
+	BREVO_API_KEY: string;
 }
 
 export default {
@@ -20,6 +21,10 @@ export default {
 		const url = new URL(request.url);
 		if (url.pathname === "/patch" && request.method === "POST") {
 			try {
+				const userEmail = request.headers.get("x-user-email");
+				if (!userEmail) {
+					return new Response("Missing x-user-email header", { status: 400 });
+				}
 				const body = await request.json() as Record<string, any>;
 				const patchId = Object.keys(body)[0];
 				const patchData = body[patchId];
@@ -94,17 +99,80 @@ export default {
 						title: `patch: update ${patchId}`,
 						head: branch,
 						base: "main",
-						body: `Automated patch for ${patchId}`,
+						body: `Automated patch for ${patchId} from ${userEmail}`,
 					}),
 				});
 				if (!prRes.ok) {
 					return new Response(`Failed to create PR: ${prRes.statusText}`, { status: 500 });
 				}
-				const pr = await prRes.json() as { html_url: string };
+				const pr = await prRes.json() as { html_url: string; number: number; merge_commit_sha: string };
+
+				// Send email via Brevo
+				const brevoApiKey = (env as Env).BREVO_API_KEY;
+				if (!brevoApiKey) {
+					return new Response("Missing BREVO_API_KEY", { status: 500 });
+				}
+				const prNumber = pr.number;
+				const mergeCommitSha = pr.merge_commit_sha;
+				const verifyUrl = `https://patch.plejehjem.info/verify/${prNumber}/${mergeCommitSha}`;
+				let patchInfoHtml = "";
+				if (patchData && typeof patchData === "object" && !Array.isArray(patchData)) {
+					patchInfoHtml = '<ul>' + Object.entries(patchData).map(([key, value]) => `<li><strong>${key}:</strong> ${String(value)}</li>`).join('') + '</ul>';
+				} else {
+					patchInfoHtml = `<p>${String(patchData)}</p>`;
+				}
+				const emailPayload = {
+					sender: { name: "Simon J.K. Pedersen", email: "sjkp@plejehjem.info" },
+					to: [{ email: userEmail }],
+					subject: `Bekræft plejehjem rettelse (${prNumber})`,
+					htmlContent: `<h3>Tak for din rettelse!</h3><p>Klik på følgende link for at bekræfte rettelsen:</p><p><a href=\"${verifyUrl}\">${verifyUrl}</a></p><h3>Detaljer om rettelsen:</h3>${patchInfoHtml}`
+				};
+				await fetch("https://api.brevo.com/v3/smtp/email", {
+					method: "POST",
+					headers: {
+						"api-key": brevoApiKey,
+						"Content-Type": "application/json",
+						"Accept": "application/json"
+					},
+					body: JSON.stringify(emailPayload)
+				});
 				return Response.json({ url: pr.html_url });
 			} catch (err) {
 				return new Response(`Error: ${err}`, { status: 500 });
 			}
+		}
+		// /verify/:prNumber/:mergeCommitSha endpoint
+		const verifyMatch = url.pathname.match(/^\/verify\/(\d+)\/([a-fA-F0-9]+)$/);
+		if (verifyMatch && request.method === "GET") {
+			const prNumber = verifyMatch[1];
+			const mergeCommitSha = verifyMatch[2];
+			const owner = "sjkp";
+			const repo = "plejehjem-info";
+			const githubToken = (env as Env).GITHUB_TOKEN;
+			if (!githubToken) {
+				return new Response("Missing GITHUB_TOKEN", { status: 500 });
+			}
+			// Get PR info to verify merge_commit_sha
+			const prRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
+				headers: { Authorization: `Bearer ${githubToken}`, "User-Agent": "cf-worker" },
+			});
+			if (!prRes.ok) {
+				return new Response(`Failed to fetch PR: ${prRes.statusText}`, { status: 404 });
+			}
+			const pr = await prRes.json() as { merge_commit_sha: string };
+			if (pr.merge_commit_sha !== mergeCommitSha) {
+				return new Response("Invalid merge_commit_sha for this PR", { status: 400 });
+			}
+			// Post a comment to the PR
+			const commentRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${githubToken}`, "User-Agent": "cf-worker", "Content-Type": "application/json" },
+				body: JSON.stringify({ body: "email verified" })
+			});
+			if (!commentRes.ok) {
+				return new Response(`Failed to post comment: ${commentRes.statusText}`, { status: 500 });
+			}
+			return Response.redirect("https://plejehjem.info/rettelse-behandles", 302);
 		}
 		return new Response('Hello World!');
 	},
