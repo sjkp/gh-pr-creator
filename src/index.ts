@@ -105,7 +105,7 @@ export default {
 				if (!prRes.ok) {
 					return new Response(`Failed to create PR: ${prRes.statusText}`, { status: 500 });
 				}
-				const pr = await prRes.json() as { html_url: string; number: number; merge_commit_sha: string };
+				const pr = await prRes.json() as { html_url: string; number: number; head: { sha: string } };
 
 				// Send email via Brevo
 				const brevoApiKey = (env as Env).BREVO_API_KEY;
@@ -113,8 +113,8 @@ export default {
 					return new Response("Missing BREVO_API_KEY", { status: 500 });
 				}
 				const prNumber = pr.number;
-				const mergeCommitSha = pr.merge_commit_sha;
-				const verifyUrl = `https://patch.plejehjem.info/verify/${prNumber}/${mergeCommitSha}`;
+				const commitId = pr.head.sha;
+				const verifyUrl = `https://patch.plejehjem.info/verify/${prNumber}/${commitId}`;
 				let patchInfoHtml = "";
 				if (patchData && typeof patchData === "object" && !Array.isArray(patchData)) {
 					patchInfoHtml = '<ul>' + Object.entries(patchData).map(([key, value]) => `<li><strong>${key}:</strong> ${String(value)}</li>`).join('') + '</ul>';
@@ -141,27 +141,27 @@ export default {
 				return new Response(`Error: ${err}`, { status: 500 });
 			}
 		}
-		// /verify/:prNumber/:mergeCommitSha endpoint
+		// /verify/:prNumber/:commitId endpoint
 		const verifyMatch = url.pathname.match(/^\/verify\/(\d+)\/([a-fA-F0-9]+)$/);
 		if (verifyMatch && request.method === "GET") {
 			const prNumber = verifyMatch[1];
-			const mergeCommitSha = verifyMatch[2];
+			const commitId = verifyMatch[2];
 			const owner = "sjkp";
 			const repo = "plejehjem-info";
 			const githubToken = (env as Env).GITHUB_TOKEN;
 			if (!githubToken) {
 				return new Response("Missing GITHUB_TOKEN", { status: 500 });
 			}
-			// Get PR info to verify merge_commit_sha
+			// Get PR info to verify commit_id
 			const prRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
 				headers: { Authorization: `Bearer ${githubToken}`, "User-Agent": "cf-worker" },
 			});
 			if (!prRes.ok) {
 				return new Response(`Failed to fetch PR: ${prRes.statusText}`, { status: 404 });
 			}
-			const pr = await prRes.json() as { merge_commit_sha: string };
-			if (pr.merge_commit_sha !== mergeCommitSha) {
-				return new Response("Invalid merge_commit_sha for this PR", { status: 400 });
+			const pr = await prRes.json() as { head: { sha: string } };
+			if (pr.head.sha !== commitId) {
+				return new Response("Invalid commit id for this PR", { status: 400 });
 			}
 			// Post a comment to the PR
 			const commentRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments`, {
